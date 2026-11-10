@@ -144,3 +144,35 @@ def test_research_outcome_invalid_discriminator_error():
 
     assert len(errors) == 1
     assert errors[0]["type"] == "union_tag_invalid"
+
+
+def test_research_outcome_validate_json():
+    json_response = """
+    {
+        "market": "Agricultura",
+        "success": true,
+        "content": "El mercado presenta oportunidades"
+    }
+    """
+
+    result = research_outcome_adapter.validate_json(json_response)
+
+    assert isinstance(result, ResearchSuccess)
+    assert result.market == "Agricultura"
+    assert result.success is True
+    assert result.content == "El mercado presenta oportunidades"
+
+def test_research_outcome_rejects_malformed_json():
+    json_response = """
+    {
+        "market": "Agricultura",
+        "success": true,
+    """
+
+    with pytest.raises(ValidationError) as exc_info:
+        research_outcome_adapter.validate_json(json_response)
+
+    errors = exc_info.value.errors()
+
+    assert len(errors) == 1
+    assert errors[0]["type"] == "json_invalid"
