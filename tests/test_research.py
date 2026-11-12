@@ -1,6 +1,8 @@
 import asyncio
 
+import httpx2 as httpx
 import pytest
+from openai import RateLimitError
 
 import ai_market_research.research as research_module
 from ai_market_research.config import RetryConfig
@@ -188,3 +190,34 @@ async def test_semaphore_limits_concurrency():
 
     assert max_active == 2
     assert active == 0
+
+
+@pytest.mark.asyncio
+async def test_insufficient_quota_no_retry():
+    attempts = 0
+
+    class FakeProvider:
+        async def research(self, market: str) -> str:
+            nonlocal attempts
+            attempts += 1
+
+            raise RateLimitError(
+                "You have no credits remaining",
+                response=httpx.Response(
+                    429,
+                    request=httpx.Request(
+                        "POST",
+                        "https://api.openai.com/v1/responses",
+                    ),
+                ),
+                body={"error": {"code": "insufficient_quota"}},
+            )
+
+    with pytest.raises(RateLimitError):
+        await research_with_retry(
+            "Agricultura",
+            config=RetryConfig(max_attempts=3, timeout=1),
+            provider=FakeProvider(),
+        )
+
+    assert attempts == 1

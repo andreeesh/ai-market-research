@@ -4,6 +4,10 @@ from ai_market_research.config import RetryConfig
 from ai_market_research.models import ResearchResult
 from ai_market_research.providers import ResearchProvider
 from ai_market_research.research import research_with_retry
+from ai_market_research.structured_retry import (
+    StructuredOutputRetry,
+    StructuredRetryResult,
+)
 
 
 class ResearchCoordinator:
@@ -17,11 +21,15 @@ class ResearchCoordinator:
         self,
         market: str,
         provider: ResearchProvider,
+        config: RetryConfig | None = None,
     ) -> str:
+        if config is None:
+            config = RetryConfig(timeout=3)
+
         async with self.semaphore:
             return await research_with_retry(
                 market,
-                config=RetryConfig(timeout=3),
+                config=config,
                 provider=provider,
             )
 
@@ -45,3 +53,23 @@ class ResearchCoordinator:
                 success=False,
                 error=str(exc),
             )
+
+    async def run_structured(
+        self,
+        market: str,
+        provider: ResearchProvider,
+        config: RetryConfig | None = None,
+    ) -> StructuredRetryResult:
+        if config is None:
+            config = RetryConfig()
+
+        async with self.semaphore:
+            retry = StructuredOutputRetry(max_attempts=config.max_attempts)
+
+            async def generate() -> str:
+                return await asyncio.wait_for(
+                    provider.research(market),
+                    timeout=config.timeout,
+                )
+
+            return await retry.run_with_metrics(generate)

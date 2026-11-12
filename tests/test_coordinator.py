@@ -2,7 +2,9 @@ import asyncio
 
 import pytest
 
+from ai_market_research.config import RetryConfig
 from ai_market_research.coordinator import ResearchCoordinator
+from ai_market_research.models import ResearchSuccess
 
 
 @pytest.mark.parametrize(
@@ -107,6 +109,7 @@ async def test_coordinator_run_safe_success():
     assert result.content == "Reporte de Agricultura"
     assert result.error is None
 
+
 @pytest.mark.asyncio
 async def test_coordinator_multiple_safe_results():
     coordinator = ResearchCoordinator(max_concurrency=2)
@@ -122,10 +125,7 @@ async def test_coordinator_multiple_safe_results():
     markets = ["Agricultura", "Software", "Energia"]
 
     results = await asyncio.gather(
-        *(
-            coordinator.run_safe(market, provider)
-            for market in markets
-        )
+        *(coordinator.run_safe(market, provider) for market in markets)
     )
 
     assert len(results) == 3
@@ -138,3 +138,173 @@ async def test_coordinator_multiple_safe_results():
 
     assert results[2].success is True
     assert results[2].content == "Reporte de Energia"
+
+
+@pytest.mark.asyncio
+async def test_coordinator_run_structured_success():
+    coordinator = ResearchCoordinator(max_concurrency=2)
+
+    class FakeProvider:
+        async def research(self, market: str) -> str:
+            return f"""
+            {{
+                "market": "{market}",
+                "success": true,
+                "content": "Oportunidad detectada"
+            }}
+            """
+
+    result = await coordinator.run_structured(
+        "Agricultura",
+        FakeProvider(),
+    )
+
+    assert isinstance(result.outcome, ResearchSuccess)
+    assert result.outcome.market == "Agricultura"
+    assert result.attempts == 1
+    assert result.error_codes == ()
+
+
+@pytest.mark.asyncio
+async def test_coordinator_run_structured_recovers():
+    coordinator = ResearchCoordinator(max_concurrency=2)
+
+    class FakeProvider:
+        def __init__(self):
+            self.attempts = 0
+
+        async def research(self, market: str) -> str:
+            self.attempts += 1
+
+            if self.attempts == 1:
+                return '{"success": true'
+
+            return f"""
+            {{
+                "market": "{market}",
+                "success": true,
+                "content": "Oportunidad detectada"
+            }}
+            """
+
+    result = await coordinator.run_structured(
+        "Agricultura",
+        FakeProvider(),
+    )
+
+    assert isinstance(result.outcome, ResearchSuccess)
+    assert result.outcome.market == "Agricultura"
+    assert result.attempts == 2
+    assert result.last_error_code == "json_invalid"
+    assert result.error_codes == ("json_invalid",)
+
+
+@pytest.mark.asyncio
+async def test_coordinator_structured_timeout():
+    coordinator = ResearchCoordinator()
+
+    class SlowProvider:
+        async def research(self, market: str) -> str:
+            await asyncio.sleep(1)
+            return "{}"
+
+    config = RetryConfig(
+        max_attempts=1,
+        timeout=0.01,
+        jitter=0,
+    )
+
+    with pytest.raises(TimeoutError):
+        await coordinator.run_structured(
+            "Agricultura",
+            SlowProvider(),
+            config=config,
+        )
+
+
+@pytest.mark.asyncio
+async def test_coordinator_structured_recovers_after_timeout():
+    coordinator = ResearchCoordinator()
+
+    class SlowProvider:
+        def __init__(self):
+            self.attempts = 0
+
+        async def research(self, market: str) -> str:
+            self.attempts += 1
+
+            if self.attempts == 1:
+                await asyncio.sleep(0.1)
+
+            return f"""
+            {{
+                "market": "{market}",
+                "success": true,
+                "content": "Investigación completada"
+            }}
+            """
+
+    config = RetryConfig(
+        max_attempts=2,
+        timeout=0.01,
+        jitter=0,
+    )
+
+    provider = SlowProvider()
+
+    result = await coordinator.run_structured(
+        "Agricultura",
+        provider,
+        config=config,
+    )
+
+    assert isinstance(result.outcome, ResearchSuccess)
+    assert result.attempts == 2
+    assert provider.attempts == 2
+    assert result.error_codes == ("timeout",)
+
+
+@pytest.mark.asyncio
+async def test_coordinator_structured_recovers_from_mixed_errors():
+    coordinator = ResearchCoordinator()
+
+    class SlowProvider:
+        def __init__(self):
+            self.attempts = 0
+
+        async def research(self, market: str) -> str:
+            self.attempts += 1
+
+            if self.attempts == 1:
+                await asyncio.sleep(0.1)
+
+            if self.attempts == 2:
+                return '{"success": true'
+
+            return f"""
+            {{
+                "market": "{market}",
+                "success": true,
+                "content": "Investigación completada"
+            }}
+            """
+
+    config = RetryConfig(
+        max_attempts=3,
+        timeout=0.01,
+        jitter=0,
+    )
+
+    provider = SlowProvider()
+
+    result = await coordinator.run_structured(
+        "Agricultura",
+        provider,
+        config=config,
+    )
+
+    assert isinstance(result.outcome, ResearchSuccess)
+    assert result.attempts == 3
+    assert provider.attempts == 3
+    assert result.last_error_code == "json_invalid"
+    assert result.error_codes == ("timeout", "json_invalid")
